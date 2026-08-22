@@ -1,0 +1,12 @@
+name = "memory-mcp"
+main = "src/index.ts"
+compatibility_date = "2025-08-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "memory-mcp"
+database_id = "5fbe9a2c-484f-478b-8659-7348352f03df"
+
+[vars]
+# API key is set via: wrangler secret put API_KEY
