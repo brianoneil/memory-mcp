@@ -1,5 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Env } from './types.js';
@@ -181,10 +181,9 @@ export default {
 
       if (request.method === 'POST') {
         const server = createServer(env);
-        const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+        const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         await server.connect(transport);
-        const response = await transport.handleRequest(request);
-        return response;
+        return transport.handleRequest(request);
       }
 
       return new Response('Method Not Allowed', { status: 405 });
