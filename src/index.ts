@@ -180,10 +180,21 @@ export default {
       if (!authenticate(request, env)) return unauthorized();
 
       if (request.method === 'POST') {
+        // Inject Accept header if missing — many MCP clients omit it
+        const accept = request.headers.get('Accept') ?? '';
+        const normalized = accept.includes('text/event-stream')
+          ? request
+          : new Request(request, {
+              headers: new Headers({
+                ...Object.fromEntries(request.headers),
+                Accept: 'application/json, text/event-stream',
+              }),
+            });
+
         const server = createServer(env);
         const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined });
         await server.connect(transport);
-        return transport.handleRequest(request);
+        return transport.handleRequest(normalized);
       }
 
       return new Response('Method Not Allowed', { status: 405 });
