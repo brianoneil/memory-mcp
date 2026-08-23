@@ -222,7 +222,10 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
       </div>
       <div class="consol-result success" x-show="consolResult && consolResult.status === 'completed'" x-cloak>
         <strong x-text="consolResult?.dry_run ? 'Preview result' : 'Done'"></strong> —
-        <span x-text="\`\${consolResult?.memories_before} memories → \${consolResult?.memories_after} (\${consolResult?.groups_processed} groups processed)\`"></span>
+        <span x-text="\`\${consolResult?.memories_before} memories → \${consolResult?.memories_after} · \${consolResult?.groups_merged} chunk(s) merged, \${consolResult?.groups_skipped} skipped\`"></span>
+        <div x-show="(consolResult?.ai_errors ?? []).length > 0" style="color:var(--danger);margin-top:.4rem;font-size:.78rem">
+          AI errors: <span x-text="(consolResult?.ai_errors ?? []).join('; ')"></span>
+        </div>
       </div>
       <div class="consol-result fail" x-show="consolResult && consolResult.status === 'failed'" x-cloak>
         Error: <span x-text="consolResult?.error"></span>
