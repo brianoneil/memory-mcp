@@ -7,6 +7,9 @@ export interface ConsolidationResult {
   memories_before: number;
   memories_after: number;
   groups_processed: number;
+  groups_merged: number;
+  groups_skipped: number;
+  ai_errors: string[];
   status: 'completed' | 'failed';
   error?: string;
 }
@@ -18,74 +21,78 @@ interface AiConsolidated {
   importance: number;
 }
 
-async function callAI(ai: Ai, memories: Memory[]): Promise<AiConsolidated | null> {
+async function callAI(ai: Ai, memories: Memory[]): Promise<AiConsolidated[] | null> {
   const memoriesText = memories
     .map((m, i) =>
       `[${i + 1}] Summary: ${m.summary}\nContent: ${m.content}\nTags: ${m.tags.join(', ')}\nImportance: ${m.importance}`
     )
-    .join('\n\n');
+    .join('\n\n---\n\n');
 
-  const prompt = `You are a memory consolidation assistant. Merge the following related memories into ONE concise memory. Rules:
-- Preserve all distinct facts; discard exact duplicates
-- Keep content concise (2-4 sentences max)
+  const prompt = `You are a memory consolidation assistant. Review these ${memories.length} memories and merge any that cover the same topic or contain redundant information. Keep memories that are about genuinely different topics separate.
+
+Rules:
+- Merge memories about the same subject into ONE concise memory
+- Keep content to 2-4 sentences max per memory
 - Summary must be 1-2 sentences
-- Set importance to the highest value among the inputs
-- Tags should be the union of all input tags (keep up to 8 most relevant)
+- Set importance to the highest value among merged memories
+- Tags should be the union of merged memories (max 8 most relevant)
+- Return a JSON array of the resulting memories (fewer than input if merges happened)
 - Return ONLY valid JSON, no other text
 
-Memories to merge:
+Input memories:
 ${memoriesText}
 
-Return exactly this JSON structure:
-{"content":"...","summary":"...","tags":["..."],"importance":1}`;
+Return exactly this format:
+[{"content":"...","summary":"...","tags":["..."],"importance":3}]`;
 
   try {
-    const response = await (ai as any).run('@cf/meta/llama-3.1-8b-instruct', {
+    const response = await (ai as any).run('@cf/meta/llama-3.3-70b-instruct-fp8-fast', {
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 512,
-    }) as { response?: string };
+      max_tokens: 2048,
+      stream: false,
+    }) as unknown;
 
-    const text = response?.response ?? '';
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    // Cloudflare Workers AI can return various shapes; extract text robustly
+    let text = '';
+    if (typeof response === 'string') {
+      text = response;
+    } else if (response && typeof response === 'object') {
+      const r = response as Record<string, unknown>;
+      const raw = r['response'] ?? (r['result'] as Record<string,unknown> | undefined)?.['response'] ?? '';
+      text = typeof raw === 'string' ? raw : JSON.stringify(raw);
+    }
+    text = text.trim();
+    // Extract JSON array
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
     if (!jsonMatch) return null;
 
-    const parsed = JSON.parse(jsonMatch[0]) as Partial<AiConsolidated>;
-    if (!parsed.content || !parsed.summary) return null;
+    const parsed = JSON.parse(jsonMatch[0]) as unknown[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
 
-    return {
-      content: String(parsed.content),
-      summary: String(parsed.summary),
-      tags: Array.isArray(parsed.tags) ? parsed.tags.map(String) : [],
-      importance: Math.min(5, Math.max(1, Number(parsed.importance) || 3)),
-    };
-  } catch {
-    return null;
+    return parsed
+      .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      .map(item => ({
+        content: String(item['content'] ?? ''),
+        summary: String(item['summary'] ?? ''),
+        tags: Array.isArray(item['tags']) ? (item['tags'] as unknown[]).map(String) : [],
+        importance: Math.min(5, Math.max(1, Number(item['importance'] ?? 3))),
+      }))
+      .filter(m => m.content && m.summary);
+  } catch (e) {
+    throw new Error(`Workers AI error: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
-function groupByTags(memories: Memory[]): Memory[][] {
-  // Group memories that share at least 2 tags; singletons kept as-is
-  const groups: Memory[][] = [];
-  const assigned = new Set<string>();
-
-  for (let i = 0; i < memories.length; i++) {
-    if (assigned.has(memories[i]!.id)) continue;
-    const group: Memory[] = [memories[i]!];
-    assigned.add(memories[i]!.id);
-
-    for (let j = i + 1; j < memories.length; j++) {
-      if (assigned.has(memories[j]!.id)) continue;
-      const sharedTags = memories[i]!.tags.filter(t => memories[j]!.tags.includes(t));
-      if (sharedTags.length >= 2) {
-        group.push(memories[j]!);
-        assigned.add(memories[j]!.id);
-      }
-    }
-
-    groups.push(group);
+function chunkMemories(memories: Memory[], chunkSize: number): Memory[][] {
+  // Sort by tags alphabetically so topically related memories cluster
+  const sorted = [...memories].sort((a, b) =>
+    a.tags.join(',').localeCompare(b.tags.join(','))
+  );
+  const chunks: Memory[][] = [];
+  for (let i = 0; i < sorted.length; i += chunkSize) {
+    chunks.push(sorted.slice(i, i + chunkSize));
   }
-
-  return groups;
+  return chunks;
 }
 
 export async function runConsolidation(
@@ -97,6 +104,7 @@ export async function runConsolidation(
 ): Promise<ConsolidationResult> {
   const runId = ulid();
   const now = Date.now();
+  const aiErrors: string[] = [];
 
   if (!dryRun) {
     await db.prepare(
@@ -106,7 +114,6 @@ export async function runConsolidation(
   }
 
   try {
-    // Get all agents to process
     let agentIds: string[];
     if (agentId) {
       agentIds = [agentId];
@@ -118,6 +125,8 @@ export async function runConsolidation(
     let totalBefore = 0;
     let totalAfter = 0;
     let totalGroupsProcessed = 0;
+    let totalGroupsMerged = 0;
+    let totalGroupsSkipped = 0;
 
     for (const aid of agentIds) {
       const rows = await db
@@ -126,56 +135,78 @@ export async function runConsolidation(
         .all<MemoryRow>();
 
       const memories = (rows.results ?? []).map(rowToMemory);
+      totalBefore += memories.length;
+
       if (memories.length < 2) {
         totalAfter += memories.length;
-        totalBefore += memories.length;
         continue;
       }
 
-      totalBefore += memories.length;
-      const groups = groupByTags(memories);
+      // Chunk memories into groups of 8 for AI processing
+      const chunks = chunkMemories(memories, 8);
 
-      for (const group of groups) {
+      for (const chunk of chunks) {
         totalGroupsProcessed++;
 
-        if (group.length < 2) {
-          // Nothing to consolidate in this group
-          totalAfter++;
+        let consolidated: AiConsolidated[] | null = null;
+        try {
+          consolidated = await callAI(ai, chunk);
+        } catch (e) {
+          aiErrors.push(e instanceof Error ? e.message : String(e));
+          totalGroupsSkipped++;
+          totalAfter += chunk.length;
           continue;
         }
 
-        const consolidated = await callAI(ai, group);
-        if (!consolidated) {
-          // AI failed for this group — leave originals untouched
-          totalAfter += group.length;
+        if (!consolidated || consolidated.length >= chunk.length) {
+          // AI returned same count or failed — nothing to merge here
+          totalAfter += chunk.length;
+          if (!consolidated) totalGroupsSkipped++;
           continue;
         }
+
+        // Merge happened
+        totalGroupsMerged++;
 
         if (!dryRun) {
           // Delete originals
-          for (const m of group) {
+          for (const m of chunk) {
             await db.prepare(`DELETE FROM memories WHERE id = ?`).bind(m.id).run();
           }
 
-          // Store consolidated memory
-          const newId = ulid();
+          // Store consolidated memories
           const mergeNow = Date.now();
-          await db.prepare(
-            `INSERT INTO memories (id, agent_id, content, summary, tags, importance, metadata, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-          ).bind(
-            newId, aid,
-            consolidated.content, consolidated.summary,
-            JSON.stringify(consolidated.tags),
-            consolidated.importance,
-            JSON.stringify({ consolidated_from: group.map(m => m.id), consolidated_at: mergeNow }),
-            mergeNow, mergeNow
-          ).run();
+          for (const c of consolidated) {
+            const newId = ulid();
+            await db.prepare(
+              `INSERT INTO memories (id, agent_id, content, summary, tags, importance, metadata, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ).bind(
+              newId, aid,
+              c.content, c.summary,
+              JSON.stringify(c.tags),
+              c.importance,
+              JSON.stringify({ consolidated_from: chunk.map(m => m.id), consolidated_at: mergeNow }),
+              mergeNow, mergeNow
+            ).run();
+          }
         }
 
-        totalAfter++;
+        totalAfter += consolidated.length;
       }
     }
+
+    const result: ConsolidationResult = {
+      run_id: runId,
+      agent_id: agentId,
+      memories_before: totalBefore,
+      memories_after: totalAfter,
+      groups_processed: totalGroupsProcessed,
+      groups_merged: totalGroupsMerged,
+      groups_skipped: totalGroupsSkipped,
+      ai_errors: aiErrors,
+      status: 'completed',
+    };
 
     if (!dryRun) {
       await db.prepare(
@@ -185,14 +216,7 @@ export async function runConsolidation(
       ).bind(Date.now(), totalBefore, totalAfter, totalGroupsProcessed, runId).run();
     }
 
-    return {
-      run_id: runId,
-      agent_id: agentId,
-      memories_before: totalBefore,
-      memories_after: totalAfter,
-      groups_processed: totalGroupsProcessed,
-      status: 'completed',
-    };
+    return result;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (!dryRun) {
@@ -206,6 +230,9 @@ export async function runConsolidation(
       memories_before: 0,
       memories_after: 0,
       groups_processed: 0,
+      groups_merged: 0,
+      groups_skipped: 0,
+      ai_errors: aiErrors,
       status: 'failed',
       error: msg,
     };
