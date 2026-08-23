@@ -4,6 +4,9 @@ import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Env } from './types.js';
 import { storeMemory, getMemory, updateMemory, deleteMemory, recallMemories, listAgents } from './db.js';
+import { runConsolidation } from './consolidate.js';
+import { handleApi } from './api.js';
+import { getDashboardHTML } from './dashboard.js';
 
 function authenticate(request: Request, env: Env): boolean {
   const auth = request.headers.get('Authorization') ?? '';
@@ -161,22 +164,57 @@ function createServer(env: Env): McpServer {
     }
   );
 
+  // ── consolidate_memories ──────────────────────────────────────────────────
+  server.registerTool(
+    'consolidate_memories',
+    {
+      description:
+        'Consolidate memories for an agent using AI — merges related memories into fewer, cleaner ones. ' +
+        'Use dry_run=true to preview without making changes.',
+      inputSchema: {
+        agent_id: z.string().min(1).describe('Agent whose memories to consolidate'),
+        dry_run: z.boolean().default(false).describe('Preview changes without writing'),
+      },
+    },
+    async (args) => {
+      const result = await runConsolidation(env.DB, env.AI, args.agent_id, 'agent', args.dry_run);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(result) }],
+      };
+    }
+  );
+
   return server;
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+    const { pathname } = url;
 
     // Health check
-    if (url.pathname === '/health') {
+    if (pathname === '/health') {
       return new Response(JSON.stringify({ ok: true, service: 'memory-mcp' }), {
         headers: { 'Content-Type': 'application/json' },
       });
     }
 
+    // Dashboard (no auth required for HTML — JS does auth via API key)
+    if (pathname === '/' || pathname === '') {
+      return new Response(getDashboardHTML(), {
+        headers: { 'Content-Type': 'text/html; charset=utf-8' },
+      });
+    }
+
+    // REST API (requires auth)
+    if (pathname.startsWith('/api/')) {
+      if (!authenticate(request, env)) return unauthorized();
+      const apiResponse = await handleApi(request, env, pathname);
+      if (apiResponse) return apiResponse;
+    }
+
     // MCP endpoint
-    if (url.pathname === '/mcp') {
+    if (pathname === '/mcp') {
       if (!authenticate(request, env)) return unauthorized();
 
       if (request.method === 'POST') {
@@ -201,5 +239,9 @@ export default {
     }
 
     return new Response('Not Found', { status: 404 });
+  },
+
+  async scheduled(_event: ScheduledEvent, env: Env): Promise<void> {
+    await runConsolidation(env.DB, env.AI, null, 'cron', false);
   },
 } satisfies ExportedHandler<Env>;
