@@ -84,6 +84,44 @@ export async function deleteMemory(db: D1Database, id: string): Promise<boolean>
   return (result.meta.changes ?? 0) > 0;
 }
 
+function sanitizeFtsQuery(q: string): string {
+  // Strip FTS5 special chars that cause syntax errors, collapse whitespace
+  return q.replace(/["'()*^:!]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function buildBaseQuery(
+  db: D1Database,
+  params: {
+    agent_id: string;
+    min_importance: number;
+    memory_class?: MemoryClass;
+    cross_agent: boolean;
+    tags?: string[];
+    limit: number;
+  }
+): { stmt: ReturnType<D1Database['prepare']> } {
+  const { agent_id, min_importance, memory_class, cross_agent, tags, limit } = params;
+  const bindings: (string | number)[] = [];
+
+  let sql = `
+    SELECT id, agent_id, summary, tags, importance, memory_class, updated_at, created_at
+    FROM memories
+    WHERE importance >= ?
+  `;
+  bindings.push(min_importance);
+  if (!cross_agent) { sql += ` AND agent_id = ?`; bindings.push(agent_id); }
+  if (memory_class) { sql += ` AND memory_class = ?`; bindings.push(memory_class); }
+  if (tags && tags.length > 0) {
+    for (const tag of tags) {
+      sql += ` AND tags LIKE ?`;
+      bindings.push(`%"${tag}"%`);
+    }
+  }
+  sql += ` ORDER BY CASE memory_class WHEN 'long_term' THEN 0 ELSE 1 END, importance DESC, updated_at DESC LIMIT ?`;
+  bindings.push(limit);
+  return { stmt: db.prepare(sql).bind(...bindings) };
+}
+
 export async function recallMemories(
   db: D1Database,
   params: {
@@ -99,46 +137,40 @@ export async function recallMemories(
   const { agent_id, query, tags, min_importance = 1, memory_class, cross_agent = false, limit } = params;
   const now = Date.now();
 
-  let sql: string;
-  const bindings: (string | number)[] = [];
+  type Row = { id: string; agent_id: string; summary: string; tags: string; importance: number; memory_class: MemoryClass; updated_at: number; created_at: number };
+
+  let rows: D1Result<Row> | null = null;
 
   if (query) {
-    sql = `
-      SELECT m.id, m.agent_id, m.summary, m.tags, m.importance, m.memory_class, m.updated_at, m.created_at
-      FROM memories_fts fts
-      JOIN memories m ON m.rowid = fts.rowid
-      WHERE memories_fts MATCH ?
-        AND m.importance >= ?
-    `;
-    bindings.push(query, min_importance);
-    if (!cross_agent) { sql += ` AND m.agent_id = ?`; bindings.push(agent_id); }
-  } else {
-    sql = `
-      SELECT id, agent_id, summary, tags, importance, memory_class, updated_at, created_at
-      FROM memories
-      WHERE importance >= ?
-    `;
-    bindings.push(min_importance);
-    if (!cross_agent) { sql += ` AND agent_id = ?`; bindings.push(agent_id); }
-  }
-
-  if (memory_class) { sql += ` AND memory_class = ?`; bindings.push(memory_class); }
-
-  if (tags && tags.length > 0) {
-    for (const tag of tags) {
-      sql += ` AND tags LIKE ?`;
-      bindings.push(`%"${tag}"%`);
+    const safe = sanitizeFtsQuery(query);
+    if (safe) {
+      try {
+        const bindings: (string | number)[] = [safe, min_importance];
+        let sql = `
+          SELECT m.id, m.agent_id, m.summary, m.tags, m.importance, m.memory_class, m.updated_at, m.created_at
+          FROM memories_fts fts
+          JOIN memories m ON m.rowid = fts.rowid
+          WHERE memories_fts MATCH ?
+            AND m.importance >= ?
+        `;
+        if (!cross_agent) { sql += ` AND m.agent_id = ?`; bindings.push(agent_id); }
+        if (memory_class) { sql += ` AND m.memory_class = ?`; bindings.push(memory_class); }
+        if (tags && tags.length > 0) {
+          for (const tag of tags) { sql += ` AND m.tags LIKE ?`; bindings.push(`%"${tag}"%`); }
+        }
+        sql += ` ORDER BY CASE m.memory_class WHEN 'long_term' THEN 0 ELSE 1 END, m.importance DESC, m.updated_at DESC LIMIT ?`;
+        bindings.push(limit);
+        rows = await db.prepare(sql).bind(...bindings).all<Row>();
+      } catch {
+        // FTS error — fall through to plain scan below
+      }
     }
   }
 
-  // Long-term first, then working_state; within each class sort by importance DESC
-  sql += ` ORDER BY CASE memory_class WHEN 'long_term' THEN 0 ELSE 1 END, importance DESC, updated_at DESC LIMIT ?`;
-  bindings.push(limit);
-
-  const rows = await db
-    .prepare(sql)
-    .bind(...bindings)
-    .all<{ id: string; agent_id: string; summary: string; tags: string; importance: number; memory_class: MemoryClass; updated_at: number; created_at: number }>();
+  if (!rows) {
+    const { stmt } = buildBaseQuery(db, { agent_id, min_importance, memory_class, cross_agent, tags, limit });
+    rows = await stmt.all<Row>();
+  }
 
   return (rows.results ?? []).map((r) => {
     const staleness_days = r.memory_class === 'working_state'
