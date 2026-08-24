@@ -101,6 +101,9 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
 .tag { background: var(--surface2); color: var(--muted); font-size: .7rem; padding: .15rem .5rem; border-radius: 10px; }
 .mem-age { font-size: .7rem; color: var(--muted); }
 .agent-label { font-size: .7rem; color: var(--accent); opacity: .7; }
+.class-badge { font-size: .65rem; padding: .15rem .45rem; border-radius: 10px; font-weight: 600; letter-spacing: .03em; }
+.class-lt { background: #1a2d4a; color: #52b0d6; }
+.class-ws { background: #2d2a1a; color: #f0c040; }
 .mem-detail { margin-top: .875rem; padding-top: .875rem; border-top: 1px solid var(--border); }
 .mem-content { font-size: .85rem; color: var(--muted); line-height: 1.6; white-space: pre-wrap; margin-bottom: .75rem; }
 .mem-actions { display: flex; gap: .5rem; }
@@ -194,8 +197,8 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
         :class="{ active: selectedAgent === a.agent_id }"
         @click="selectAgent(a.agent_id)"
         :title="a.agent_id">
-        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px" x-text="a.agent_id"></span>
-        <span class="badge" x-text="a.count"></span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:140px" x-text="a.agent_id"></span>
+        <span class="badge" :title="a.working_state_count + ' working'" x-text="a.count"></span>
       </div>
     </template>
   </aside>
@@ -253,10 +256,12 @@ input:focus { outline: 2px solid var(--accent); outline-offset: 1px; border-colo
             <div style="flex:1">
               <div class="mem-summary" x-text="m.summary"></div>
               <div class="mem-meta">
+                <span class="class-badge" :class="m.memory_class === 'working_state' ? 'class-ws' : 'class-lt'" x-text="m.memory_class === 'working_state' ? 'working' : 'long-term'"></span>
                 <template x-for="t in (m.tags ?? [])" :key="t">
                   <span class="tag" x-text="t"></span>
                 </template>
                 <span class="mem-age" x-text="relTime(m.updated_at)"></span>
+                <span class="mem-age" x-show="m.memory_class === 'working_state' && m.staleness_days != null" x-text="'· ' + m.staleness_days + 'd stale'"></span>
                 <span class="agent-label" x-show="selectedAgent === null" x-text="m.agent_id"></span>
               </div>
             </div>
