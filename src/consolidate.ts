@@ -129,8 +129,9 @@ export async function runConsolidation(
     let totalGroupsSkipped = 0;
 
     for (const aid of agentIds) {
+      // Only consolidate long_term memories — working_state is replaced, not merged
       const rows = await db
-        .prepare(`SELECT * FROM memories WHERE agent_id = ? ORDER BY importance DESC, updated_at DESC`)
+        .prepare(`SELECT * FROM memories WHERE agent_id = ? AND memory_class = 'long_term' ORDER BY importance DESC, updated_at DESC`)
         .bind(aid)
         .all<MemoryRow>();
 
