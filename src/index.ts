@@ -211,6 +211,26 @@ function createServer(env: Env): McpServer {
     }
   );
 
+  // ── get_current_time ─────────────────────────────────────────────────────
+  server.registerTool(
+    'get_current_time',
+    {
+      description:
+        'Returns the current UTC date and time as a Unix timestamp (ms) and ISO 8601 string. ' +
+        'Use this to determine how old working_state memories are — compare against their updated_at or staleness_days.',
+      inputSchema: {},
+    },
+    async () => {
+      const now = Date.now();
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ now_ms: now, iso: new Date(now).toISOString() }),
+        }],
+      };
+    }
+  );
+
   // ── consolidate_memories ──────────────────────────────────────────────────
   server.registerTool(
     'consolidate_memories',
