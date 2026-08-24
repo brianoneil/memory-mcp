@@ -125,18 +125,24 @@ function createServer(env: Env): McpServer {
       },
     },
     async (args) => {
-      const results = await recallMemories(env.DB, {
-        agent_id: args.agent_id,
-        query: args.query,
-        tags: args.tags,
-        min_importance: args.min_importance,
-        memory_class: args.memory_class,
-        cross_agent: args.cross_agent,
-        limit: args.limit,
-      });
-      return {
-        content: [{ type: 'text', text: JSON.stringify(results) }],
-      };
+      try {
+        const results = await recallMemories(env.DB, {
+          agent_id: args.agent_id,
+          query: args.query,
+          tags: args.tags,
+          min_importance: args.min_importance,
+          memory_class: args.memory_class,
+          cross_agent: args.cross_agent,
+          limit: args.limit,
+        });
+        return {
+          content: [{ type: 'text', text: JSON.stringify(results) }],
+        };
+      } catch (e) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ error: e instanceof Error ? e.message : String(e), results: [] }) }],
+        };
+      }
     }
   );
 
