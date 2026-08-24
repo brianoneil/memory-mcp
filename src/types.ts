@@ -4,6 +4,8 @@ export interface Env {
   AI: Ai;
 }
 
+export type MemoryClass = 'long_term' | 'working_state';
+
 export interface Memory {
   id: string;
   agent_id: string;
@@ -11,6 +13,7 @@ export interface Memory {
   summary: string;
   tags: string[];
   importance: number;
+  memory_class: MemoryClass;
   metadata: Record<string, unknown>;
   created_at: number;
   updated_at: number;
@@ -23,6 +26,7 @@ export interface MemoryRow {
   summary: string;
   tags: string;
   importance: number;
+  memory_class: MemoryClass;
   metadata: string;
   created_at: number;
   updated_at: number;
@@ -33,6 +37,7 @@ export function rowToMemory(row: MemoryRow): Memory {
     ...row,
     tags: JSON.parse(row.tags) as string[],
     metadata: JSON.parse(row.metadata) as Record<string, unknown>,
+    memory_class: (row.memory_class ?? 'long_term') as MemoryClass,
   };
 }
 
@@ -42,5 +47,7 @@ export interface MemorySummary {
   summary: string;
   tags: string[];
   importance: number;
+  memory_class: MemoryClass;
+  staleness_days?: number;
   created_at: number;
 }
