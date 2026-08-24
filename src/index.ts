@@ -3,7 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod';
 import { ulid } from 'ulid';
 import { Env } from './types.js';
-import { storeMemory, getMemory, updateMemory, deleteMemory, recallMemories, listAgents } from './db.js';
+import { storeMemory, getMemory, updateMemory, deleteMemory, recallMemories, listAgents, replaceWorkingState } from './db.js';
 import { runConsolidation } from './consolidate.js';
 import { handleApi } from './api.js';
 import { getDashboardHTML } from './dashboard.js';
@@ -32,14 +32,20 @@ function createServer(env: Env): McpServer {
     'store_memory',
     {
       description:
-        'Store a new memory. Provide a full content and a short summary (1–2 sentences). ' +
-        'Set importance 1–5 (1=trivia, 3=useful, 5=critical). Add tags for easier recall later.',
+        'Store a new long-term memory. Use this for facts that remain true over time: ' +
+        'who the user is, their goals, relationships, preferences, key decisions, and ongoing projects. ' +
+        'For current task context (what you\'re working on right now), use update_working_state instead. ' +
+        'Set importance 1–5 (1=trivia, 3=useful, 5=critical).',
       inputSchema: {
         agent_id: z.string().min(1).describe('Unique identifier for the calling agent'),
         content: z.string().min(1).describe('Full memory content'),
         summary: z.string().min(1).describe('Short 1–2 sentence summary for fast scanning'),
         tags: z.array(z.string()).default([]).describe('Categorisation tags'),
         importance: z.number().int().min(1).max(5).default(3).describe('1=low 5=critical'),
+        memory_class: z.enum(['long_term', 'working_state']).default('long_term').describe(
+          'long_term = authoritative facts that persist indefinitely; ' +
+          'working_state = current task context that decays in relevance over time'
+        ),
         metadata: z.record(z.unknown()).default({}).describe('Optional freeform metadata'),
       },
     },
@@ -53,11 +59,49 @@ function createServer(env: Env): McpServer {
         summary: args.summary,
         tags: args.tags,
         importance: args.importance,
+        memory_class: args.memory_class,
         metadata: args.metadata as Record<string, unknown>,
         now,
       });
       return {
-        content: [{ type: 'text', text: JSON.stringify({ id, stored: true }) }],
+        content: [{ type: 'text', text: JSON.stringify({ id, stored: true, memory_class: args.memory_class }) }],
+      };
+    }
+  );
+
+  // ── update_working_state ─────────────────────────────────────────────────
+  server.registerTool(
+    'update_working_state',
+    {
+      description:
+        'Replace the current working-state for an agent in one atomic call. ' +
+        'Deletes all previous working_state memories for this agent and stores a fresh one. ' +
+        'Use this at the end of a session or whenever the task context changes significantly. ' +
+        'Working-state decays in relevance over time — staleness_days is returned in recall results.',
+      inputSchema: {
+        agent_id: z.string().min(1).describe('Unique identifier for the calling agent'),
+        content: z.string().min(1).describe('Full description of current task context'),
+        summary: z.string().min(1).describe('Short 1–2 sentence summary for fast scanning'),
+        tags: z.array(z.string()).default([]).describe('Categorisation tags'),
+        importance: z.number().int().min(1).max(5).default(3).describe('1=low 5=critical'),
+        metadata: z.record(z.unknown()).default({}).describe('Optional freeform metadata'),
+      },
+    },
+    async (args) => {
+      const id = ulid();
+      const now = Date.now();
+      const result = await replaceWorkingState(env.DB, {
+        id,
+        agent_id: args.agent_id,
+        content: args.content,
+        summary: args.summary,
+        tags: args.tags,
+        importance: args.importance,
+        metadata: args.metadata as Record<string, unknown>,
+        now,
+      });
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ id, ...result }) }],
       };
     }
   );
@@ -68,12 +112,14 @@ function createServer(env: Env): McpServer {
     {
       description:
         'Search memories and return summaries + IDs. Use get_memory to fetch full content for specific results. ' +
-        'Set cross_agent=true to search memories stored by other agents.',
+        'Set cross_agent=true to search memories stored by other agents. ' +
+        'Working-state results include staleness_days so you can gauge how stale the context is.',
       inputSchema: {
         agent_id: z.string().min(1).describe('Calling agent ID (used as default namespace)'),
         query: z.string().optional().describe('Full-text search query'),
         tags: z.array(z.string()).optional().describe('Filter by tags (AND logic)'),
         min_importance: z.number().int().min(1).max(5).default(1).describe('Minimum importance'),
+        memory_class: z.enum(['long_term', 'working_state']).optional().describe('Filter by memory class; omit for both'),
         cross_agent: z.boolean().default(false).describe('Include memories from other agents'),
         limit: z.number().int().min(1).max(100).default(20).describe('Max results'),
       },
@@ -84,6 +130,7 @@ function createServer(env: Env): McpServer {
         query: args.query,
         tags: args.tags,
         min_importance: args.min_importance,
+        memory_class: args.memory_class,
         cross_agent: args.cross_agent,
         limit: args.limit,
       });
@@ -155,7 +202,7 @@ function createServer(env: Env): McpServer {
   server.registerTool(
     'list_agents',
     {
-      description: 'List all agent IDs that have stored memories, with counts.',
+      description: 'List all agent IDs that have stored memories, with total count and working_state_count.',
       inputSchema: {},
     },
     async () => {
